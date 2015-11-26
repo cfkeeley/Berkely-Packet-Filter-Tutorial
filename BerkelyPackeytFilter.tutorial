@@ -6,9 +6,6 @@ This tutorial does not attempt to explain the C code semantics of a program impl
 but attempts to explain the workings of the Pseudo Filter machine that is used to identify specific types 
 of packets that pass within the listening scope of the bpf device /dev/bpf(n).
 
-WHY DID I WRITE THIS TUTORIAL? 
-Is it just me that thinks the filter explanation on the man page suks?  
-
 ---( DISCLAIMER )---------------------------------------------------------------------
 
 I expect to have made mistakes in this document somewhere or other, if you find them, I would appreciate you either pointing them out, or if you can be bothered, correcting them inline.
@@ -80,13 +77,6 @@ and here is the defintion of the structure they are assigned into.
 		u_char    jf;
 		int32_t   k;
 	};
-
-
-	*** NOTE: further info can be found with a quick google for the bpf manual page or header file (bpf.h) ***
-
-
-
-ok, back to business..
 
 	FILTER[0]:  BPF_LD+BPF_H+BPF_ABS, 12
 
