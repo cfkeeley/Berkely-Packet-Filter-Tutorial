@@ -1,0 +1,275 @@
+--------------------------------------------------------------------
+A BPF (Berkely Packet filter) Pseudo Machine Tutorial.
+--------------------------------------------------------------------
+
+This tutorial does not attempt to explain the C code semantics of a program implementing a bpf device, 
+but attempts to explain the workings of the Pseudo Filter machine that is used to identify specific types 
+of packets that pass within the listening scope of the bpf device /dev/bpf(n).
+
+WHY DID I WRITE THIS TUTORIAL? 
+Is it just me that thinks the filter explanation on the man page suks?  
+
+---( DISCLAIMER )---------------------------------------------------------------------
+
+I expect to have made mistakes in this document somewhere or other, if you find them, I would appreciate you either pointing them out, or if you can be bothered, correcting them inline.
+
+N.B. the BPF instructions used in this tutorial are only a 'subset' of all available instruction for the pseudo machine. 
+  
+NOTE: 
+	*) Some knowledge of C would be useful in understanding this tutorial (though not mandatory), namely structs, macros and arrays of structs.
+	*) Use of the term 'word' will refer to a 32bit data type.	
+
+	*) BPF_ABS is defined in bpf.h and has a constant value of 0
+
+	*) Explanations will be provided for parsing data link packets of type:ETHERNET. 
+	*) I will be using an example of a filter instruction set from the bpf manual page included with OpenBSD.
+
+filter instruction set example from 'man bpf':
+
+           struct bpf_insn FILTER[] = {
+                   BPF_STMT(BPF_LD+BPF_H+BPF_ABS, 12),
+                   BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, ETHERTYPE_IP, 0, 8),
+                   BPF_STMT(BPF_LD+BPF_W+BPF_ABS, 26),
+                   BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0x8003700f, 0, 2),
+                   BPF_STMT(BPF_LD+BPF_W+BPF_ABS, 30),
+                   BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0x80037023, 3, 4),
+                   BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0x80037023, 0, 3),
+                   BPF_STMT(BPF_LD+BPF_W+BPF_ABS, 30),
+                   BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, 0x8003700f, 0, 1),
+                   BPF_STMT(BPF_RET+BPF_K, (u_int)-1),
+                   BPF_STMT(BPF_RET+BPF_K, 0),
+           };
+
+
+Protocol Encapsulation diagram 1.0:
+(further nesting of higher level protocols has been omitted for the sake of clarity)
+
+	 ----------------------------------
+	| ETHERNET HEADER
+	|	 --------------------------
+	|	| IP HEADER
+	|	| 	 ------------------
+	|	| 	| UDP, TCP, ICMP HEADER + DATA
+	|       |	|
+	|	|	 ------------------
+	|	|
+	|	 --------------------------
+	|
+	 -----------------------------------
+
+
+
+
+The bpf_insn FILTER only accepts IP packets between hosts 128.3.112.15 and 128.3.112.35
+I will now go through each element of FILTER and explain the sequence of commands, their effects and thus the discrimination between packets.  
+
+Firstly, BPF_STMT and BPF_JUMP are array initializer macros which populate an element of FILTER[n] with relevant values.
+
+here are their definitions as seen in bpf.h
+
+	BPF_STMT(code, k)	{ (u_int16_t)(code), 0, 0, k }  /* as you can see, BPF_STMT assigns default values of 0 to jt and jf respectively */
+
+	BPF_JUMP(code, k, jt, jf)	{ (u_int16_t)(code), jt, jf, k }
+
+and here is the defintion of the structure they are assigned into.
+
+	struct bpf_insn {
+
+		u_int16_t code;
+		u_char	  jt;
+		u_char    jf;
+		int32_t   k;
+	};
+
+
+	*** NOTE: further info can be found with a quick google for the bpf manual page or header file (bpf.h) ***
+
+
+
+ok, back to business..
+
+	FILTER[0]:  BPF_LD+BPF_H+BPF_ABS, 12
+
+			This instruction will load the 12th byte of the ethernet header from an offset of BPF_ABS (see bpf.h)
+			using a data size of BPF_H (halfword)  
+			this encompases the *13th and 14th bytes of the header for analysis.
+
+			ETHERNET diagram 1.1
+
+			0		1		2		3		4
+			+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			|	Ethernet destination address 				|
+			+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			|      ethernet destination 	|	ethernet source		| 
+			+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			|	Ethernet source address 				|
+			+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			| 	   Type code 		|				
+			+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			^               ^
+			13th byte	14th byte					
+
+			*this is the start of a half word that defines its protocol type.
+
+
+	FILTER[1]: 	BPF_JMP+BPF_JEQ+BPF_K, ETHERTYPE_IP, 0 , 8
+
+			BPF_JEQ: Jump if equal. This will compare the 2 bytes of 'Type code' with constant ETHERTYPE_IP(value is:0x8035)
+
+				The result is assigned using the ternary operator  exp1 ? exp2 : exp3
+				(and im assuming the equality comparison is achieved with a logical &)
+
+				Therefore IF the Type Code is equal to the ETHERTYPE_IP code then return jt(0) which will be the offset from
+				the next instruction (in other words parse the next instruction as normal) 
+
+				[comparison == TRUE]
+                   					accept packet and continue parsing next instruction with an offset of 0			
+
+				[comparison == FALSE]
+							jump with an offset of 8 from next instruction 
+                   					taking us to here....	
+
+							FILTER[10]: BPF_STMT(BPF_RET+BPF_K, 0),
+							which returns a value of 0 thus discarding the packet 
+
+
+	FILTER[2]: 	Continuing on the basis that the packet has been accepted we now have another load statement...
+
+			BPF_LD+BPF_W+BPF_ABS, 26 
+		
+			This statement will load in the 26th byte from a fixed offset of BPF_ABS, the start of the ethernet header.
+
+			Since the ethernet header is 14 bytes in length, an offset of 26 from 0 will take us into byte 12 of the IP header (which follows 
+			sequentially from the ethernet header, see diagram 1.0) 
+
+		
+			IP header diagram 1.2
+
+			0		1		2		3		4
+			+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			| ver   | hlen  | TOS 		| total length 			|
+			+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			| identification 		| flgs| fragment offset 	|
+			+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			| TTL		| protocol	| header checksum 		|
+			+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			| 		source address					|
+			+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			|		destination address				|
+			+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			|	options 				| padding 	|
+			+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			
+
+			Byte 12 is the start of a word that defines the source address of the IP header
+			
+
+	FILTER[3]:      Ok, now that we have the source address a comparison is made against 0x8003700f 
+                   
+		   	BPF_JMP+BPF_JEQ+BPF_K, 0x8003700f, 0, 2
+			
+			In this case the IP addr to compare against is 128.03.112.15 (0x8003700f) 
+
+			************************************************
+			NOTE: 	here we have a cple of branches in execution 
+				I have chosen to illustrate each branch 
+				with nested TRUE path and 
+				FALSE path explanations, annotated with 
+				levels of nested depth i.e LEVEL 1, LEVEL 2....LEVEL n
+			************************************************	
+
+			* LEVEL 1 * [comparison == TRUE]: return jt(0) as offset and continue parsing next instruction at that offset
+
+
+				which takes us here...the next element. 
+					
+                   			FILETR[4]: BPF_LD+BPF_W+BPF_ABS, 30
+						
+						load a word at byte offset 30 from BPF_ABS, which is the IP destination address. 
+
+					FILTER[5]: BPF_JMP+BPF_JEQ+BPF_K, 0x80037023, 3, 4
+
+						now compare that destination IP address with 0x80037032 (128.03.112.35)
+
+						** LEVEL 2 ** [comparison == TRUE]:
+
+							jump offset will be jt(3) which leads us 3 instructions on from the next instruction to here..
+                   						
+							FILTER[9]: BPF_RET+BPF_K, (u_int)-1
+
+							result: return the packet 
+
+							NOTE: 	the amount of accepted packet returned will be the minimum length of the 
+								packet and the amount indicated by the filter in question.
+
+							
+								
+
+						** LEVEL 2 ** [comparison == FALSE]:
+							
+							jump offset will be jf(4) which leads us to here....
+
+                   					FILTER[10]: BPF_RET+BPF_K, 0
+
+							result: discard entire packet
+
+
+
+
+
+			* LEVEL 1 * [comparison == FALSE]: return jf(2) as offset and continue parsing from that offset 
+
+					which leads us to here.....
+                   			
+					FILTER[6]: BPF_JMP+BPF_JEQ+BPF_K, 0x80037023, 0, 3
+
+					
+						compare with 0x8003700f (128.03.112.35)
+
+						** LEVEL 2 ** [comparison == TRUE] 
+							
+								if its true then parse next instruction from an offset of jt(0)
+
+								which takes us here...
+                   						
+								FILTER[7]: BPF_LD+BPF_W+BPF_ABS, 30
+
+								load a word in from BPF_ABS at offset 30
+								this again is the destination address in the IP header 
+
+                   						FILTER[8]: BPF_JMP+BPF_JEQ+BPF_K, 0x8003700f, 0, 1
+
+								*** LEVEL 3 *** [comparison == TRUE]
+									
+									move onto next instruction and execute from offset 0
+
+									the instruction is..
+                   							FILTER[9]: BPF_RET+BPF_K, (u_int)-1
+
+									result: return packet 
+									
+									NOTE: 	the amount of accepted packet returned will be the 
+										minimum length of the packet and the amount indicated 
+										by the filter in question.
+
+
+								*** LEVEL 3 *** [comparison == FALSE]
+
+									jump to next instruction with an offset of 1
+
+									which takes us here...
+                   								
+									FILTER[10]: BPF_RET+BPF_K, 0
+
+									result: discard entire packet 
+
+						** LEVEL 2 ** [comparison == FALSE]
+
+								jump to next instruction with an offset of 3
+								which leads us here... 
+                   						
+								FILTER[10]: BPF_RET+BPF_K, 0
+
+								result: discard entire packet
+
+-- EOF 
